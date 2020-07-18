@@ -1,17 +1,21 @@
 import sys
 import math
+from datetime import datetime
+
 import requests
 from threatresponse import ThreatResponse
+
+def clear_input(message=None):
+    '''Clear the last line from the terminal and output a message
+    '''
+    sys.stdout.write('\x1b[1A')
+    sys.stdout.write('\x1b[2K')
+    sys.stdout.write(message)
 
 def ask_for_scd_index(count):
     '''Ask the user for a SCD index
        Keep asking until they enter a valid SCD index
     '''
-    def clear_input(message):
-        sys.stdout.write('\x1b[1A')
-        sys.stdout.write('\x1b[2K')
-        sys.stdout.write(message)
-
     while True:
         try:
             reply = (input('Enter the index of the SCD List you would like to check: '))
@@ -32,6 +36,7 @@ def confirm_continue(message):
             return True
         if reply[:1] == 'n':
             return False
+        clear_input(f'{reply} is not \"y\" or \"n\".')
 
 def split_list(list_to_split, max_size=20):
     '''Split a large list into a list of lists with a maximum size of 20 items
@@ -40,14 +45,14 @@ def split_list(list_to_split, max_size=20):
     '''
     return [list_to_split[i:i + max_size] for i in range(0, len(list_to_split), max_size)]
 
-def get_scd_file_lists(amp_hostname, session):
+def get_scd_file_lists(session, amp_hostname):
     '''Query AMP for Endpoints for SCD Lists
     '''
     url = f'https://{amp_hostname}/v1/file_lists/simple_custom_detections'
     response = session.get(url)
     return response
 
-def get_file_list_items(amp_hostname, session, file_lists_guid):
+def get_file_list_items(session, amp_hostname, file_list_guid):
     '''Get File List items for a given SCD GUID
     Paginate through the results when there are more than 500 items returned
     '''
@@ -72,8 +77,8 @@ def get_file_list_items(amp_hostname, session, file_lists_guid):
     # Container to store the SCD List items
     response_items = []
 
-    print(f'Getting Page: {page_count} of', end=' ')
-    url = f'https://{amp_hostname}/v1/file_lists/{file_lists_guid}/files'
+    print(f'  Page: {page_count} of', end=' ')
+    url = f'https://{amp_hostname}/v1/file_lists/{file_list_guid}/files'
 
     # Query AMP for Endpoints for SCD List items and decode the JSON response
     response_json = query_api(url)
@@ -84,6 +89,11 @@ def get_file_list_items(amp_hostname, session, file_lists_guid):
 
     # Calculate total number of pages
     pages = math.ceil(total/items_per_page)
+
+    # If pages is 0 because total is 0 set pages to 1
+    if not pages:
+        pages = 1
+
     print(pages)
 
     # Parse AMP for Endpoints response
@@ -92,7 +102,7 @@ def get_file_list_items(amp_hostname, session, file_lists_guid):
     # Get the next page of results if needed
     while 'next' in response_json['metadata']['links']:
         page_count += 1
-        print(f'Getting Page: {page_count} of {pages}')
+        print(f'  Page: {page_count} of {pages}')
         next_url = response_json['metadata']['links']['next']
 
         # Query AMP for Endpoints for the next page of SCD List items
@@ -103,10 +113,10 @@ def get_file_list_items(amp_hostname, session, file_lists_guid):
 
     return response_items
 
-def delete_list_item(amp_hostname, session, file_lists_guid, sha256):
+def delete_list_item(session, amp_hostname, file_list_guid, sha256):
     '''Remove SHA256 from SCD
     '''
-    url = f'https://{amp_hostname}/v1/file_lists/{file_lists_guid}/files/{sha256}'
+    url = f'https://{amp_hostname}/v1/file_lists/{file_list_guid}/files/{sha256}'
     response = session.delete(url)
     return response
 
@@ -137,9 +147,25 @@ def parse_verdicts(response, malicious_hashes):
                 if disposition == 2:
                     malicious_hashes.append(observable)
 
+def replace_space(string):
+    '''Replace spaces in a string with underscore
+    '''
+    return string.replace(' ', '_')
+
+def save_list_items(file_name, malicious_hashes):
+    '''Write SHA256s that have malicious disposition to file
+    '''
+    with open(file_name, 'w') as file:
+        for sha256 in malicious_hashes:
+            file.write(f'{sha256}\n')
+
 def main():
     '''Main script logic
     '''
+
+    # Calculate now timestamp and store as file system friendly string
+    now = datetime.now()
+    start_time = datetime.strftime(now, '%Y-%m-%dT%H.%M.%S.%f')
 
     # AMP for Endpoints API Credentials
     amp_client_id = 'a1b2c3d4e5f6g7h8i9j0'
@@ -164,7 +190,7 @@ def main():
     malicious_hashes = []
 
     # Get Simple Custom Detaction File Lists
-    scd_lists = get_scd_file_lists(amp_hostname, amp_session).json()
+    scd_lists = get_scd_file_lists(amp_session, amp_hostname).json()
     data = scd_lists.get('data', [])
 
     # Present SCD Lists to user and ask which one to process
@@ -177,8 +203,8 @@ def main():
     scd_guid = data[index]['guid']
 
     # Get List items for selected SCD List
-    print(f'Getting items for: {scd_name}')
-    scd_list_items = get_file_list_items(amp_hostname, amp_session, scd_guid)
+    print(f'\nGetting SHA256s for: {scd_name}')
+    scd_list_items = get_file_list_items(amp_session, amp_hostname, scd_guid)
 
     # Build Threat Response Enrich Payloads using list comprehension
     enrich_payloads = [
@@ -186,16 +212,23 @@ def main():
     ]
 
     # Inform how many SCD List items were found
-    print(f'{scd_name} has {len(enrich_payloads)} items')
+    item_count = len(enrich_payloads)
+    print(f'SHA256s on {scd_name}: {item_count} \n')
+    if not enrich_payloads:
+        sys.exit()
 
     # Split payloads into list of lists with 20 items maximum
+    if item_count > 20:
+        print(f'Splitting into {math.ceil(item_count/20)} chunks of 20 or less and checking verdicts')
+    else:
+        print('Checking verdicts')
     chunked_enrich_payloads = split_list(enrich_payloads)
 
     # Iterate over list and get Verdicts for list of SCD List items
     for payload_index, payload in enumerate(chunked_enrich_payloads, start=1):
 
         # Query Threat Response for verdcits
-        print(f'Checking verdicts for chunk {payload_index} of {len(chunked_enrich_payloads)}')
+        print(f'  Checking verdicts for chunk {payload_index} of {len(chunked_enrich_payloads)}')
         verdicts = get_verdicts(client, payload)
         parse_verdicts(verdicts, malicious_hashes)
 
@@ -204,8 +237,11 @@ def main():
 
     # Verify there are SHA256s with malicious dispositions and confirm the user wants to delete them
     if malicious_hashes:
+        file_name = f'{replace_space(scd_name)}_{scd_guid}_{start_time}.txt'
+        print(f'\nSaving SHA256s to file:\n  {file_name}')
+        save_list_items(file_name, malicious_hashes)
         if not confirm_continue(
-                f"Are you sure you want to remove these SHA256s from {scd_name}? (y/n): "
+                f'\nDo you want to remove these SHA256s from {scd_name}? (y/n): '
         ):
             sys.exit("Bye!")
     else:
@@ -214,7 +250,7 @@ def main():
     # Delete SHA256s with malicious disposition from selected SCD List
     for sha256 in malicious_hashes:
         print(f'Deleting {sha256}', end=' ')
-        response = delete_list_item(amp_hostname, amp_session, scd_guid, sha256)
+        response = delete_list_item(amp_session, amp_hostname, scd_guid, sha256)
         if response.ok:
             print('- DONE!')
         else:
