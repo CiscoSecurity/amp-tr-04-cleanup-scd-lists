@@ -4,7 +4,8 @@
 
 Script prompts the user for which SCD List they would like to clean up. Once chosen, it collects all of the items on the list (using pagination if needed) and then queries Threat Response for the current disposition of the file in the AMP File Reputation database. If the file has a `Malicious` disposition it is saved to a file and the user is asked if they would like to remove the SHA256s from the SCD List.
 
-The script saves the SHA256s that have a `Malicious` disposition to a file with the following name: `<SCD NAME>_<SCD GUID>_<DATE TIMESTAMP>.txt`
+The script saves the SHA256s that have a `Malicious` disposition to a file with the following name:  
+`<SCD NAME>_<SCD GUID>_<DATE TIMESTAMP>.txt`
 
 ### Before using you must update the following:
 - amp_client_id
